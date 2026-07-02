@@ -7150,6 +7150,121 @@ exit 0
       );
       assert.equal(reportedHandoffShape.outputJson, null);
 
+      const blockedHandoffWithSameCommandArtifactExecution = await preToolUse(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          session_id: "sess-di-artifact",
+          tool_name: "Bash",
+          tool_use_id: "tool-di-reported-handoff-with-artifact-exec",
+          tool_input: {
+            command: [
+              "mkdir -p .omx/context",
+              "cat > .omx/context/run.sh <<'EOF'",
+              "printf '%s\\n' same-command-artifact-executed",
+              "EOF",
+              "sh .omx/context/run.sh",
+              `omx state write --input '${deepInterviewRalplanHandoffState}' --json`,
+            ].join("\n"),
+          },
+        },
+        { cwd },
+      );
+      assert.equal((blockedHandoffWithSameCommandArtifactExecution.outputJson as { decision?: string } | null)?.decision, "block");
+      assert.match(String((blockedHandoffWithSameCommandArtifactExecution.outputJson as { reason?: string } | null)?.reason ?? ""), /same-command|Bash write intent|handoff/i);
+
+      for (const [toolUseId, artifactDir, scriptName, executionLine] of [
+        [
+          "tool-di-reported-handoff-with-cd-relative-sh-exec",
+          ".omx/context",
+          "run.sh",
+          "cd .omx/context && sh run.sh",
+        ],
+        [
+          "tool-di-reported-handoff-with-command-cd-relative-sh-exec",
+          ".omx/context",
+          "run.sh",
+          "command cd .omx/context && sh run.sh",
+        ],
+        [
+          "tool-di-reported-handoff-with-builtin-cd-relative-sh-exec",
+          ".omx/context",
+          "run.sh",
+          "builtin cd .omx/context && sh run.sh",
+        ],
+        [
+          "tool-di-reported-handoff-with-cd-double-dash-relative-sh-exec",
+          ".omx/context",
+          "run.sh",
+          "cd -- .omx/context && sh run.sh",
+        ],
+        [
+          "tool-di-reported-handoff-with-cd-physical-relative-sh-exec",
+          ".omx/context",
+          "run.sh",
+          "cd -P .omx/context && sh run.sh",
+        ],
+        [
+          "tool-di-reported-handoff-with-cd-logical-relative-sh-exec",
+          ".omx/context",
+          "run.sh",
+          "cd -L .omx/context && sh run.sh",
+        ],
+        [
+          "tool-di-reported-handoff-with-cd-relative-dot-source",
+          ".omx/specs",
+          "env.sh",
+          "cd .omx/specs && . env.sh",
+        ],
+        [
+          "tool-di-reported-handoff-with-cd-relative-direct-exec",
+          ".omx/context",
+          "run-relative.sh",
+          "cd .omx/context && ./run-relative.sh",
+        ],
+        [
+          "tool-di-reported-handoff-with-setsid-direct-exec",
+          ".omx/context",
+          "run.sh",
+          "setsid ./.omx/context/run.sh",
+        ],
+        [
+          "tool-di-reported-handoff-with-env-chdir-relative-sh-exec",
+          ".omx/context",
+          "run.sh",
+          "env -C .omx/context sh run.sh",
+        ],
+        [
+          "tool-di-reported-handoff-with-env-long-chdir-relative-dot-source",
+          ".omx/specs",
+          "env.sh",
+          "env --chdir .omx/specs . env.sh",
+        ],
+      ] as const) {
+        const blockedCwdRelativeArtifactExecution = await preToolUse(
+          {
+            hook_event_name: "PreToolUse",
+            cwd,
+            session_id: "sess-di-artifact",
+            tool_name: "Bash",
+            tool_use_id: toolUseId,
+            tool_input: {
+              command: [
+                `mkdir -p ${artifactDir}`,
+                `cat > ${artifactDir}/${scriptName} <<'EOF'`,
+                "printf '%s\\n' same-command-cwd-relative-artifact-executed",
+                "EOF",
+                executionLine,
+                `omx state write --input '${deepInterviewRalplanHandoffState}' --json`,
+              ].join("\n"),
+            },
+          },
+          { cwd },
+        );
+        assert.equal((blockedCwdRelativeArtifactExecution.outputJson as { decision?: string } | null)?.decision, "block", executionLine);
+        assert.match(String((blockedCwdRelativeArtifactExecution.outputJson as { reason?: string } | null)?.reason ?? ""), /same-command|Bash write intent|handoff/i, executionLine);
+      }
+
       const blockedHandoffWithImplementationWrite = await preToolUse(
         {
           hook_event_name: "PreToolUse",

@@ -29,6 +29,488 @@ const DENIED_BASH_PATTERNS: RegExp[] = [
   /\bgh\s+pr\s+merge\b/,
 ];
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeProtectedArtifactPath(path: string): string {
+  return path.replace(/^\.\//, '');
+}
+
+function normalizeShellPath(path: string): string {
+  return path
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/\/\.\//g, '/')
+    .replace(/\/+/g, '/');
+}
+
+function joinShellPath(cwd: string, path: string): string {
+  if (!cwd || cwd === '.') return normalizeShellPath(path);
+  if (path.startsWith('/')) return normalizeShellPath(path);
+  return normalizeShellPath(`${cwd}/${path}`);
+}
+
+function sameShellPath(candidate: string, target: string): boolean {
+  return normalizeShellPath(candidate) === normalizeShellPath(target);
+}
+
+function shellWords(statement: string): string[] {
+  const words: string[] = [];
+  let current = '';
+  let quote: 'single' | 'double' | null = null;
+  let escaped = false;
+
+  for (const char of statement) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && quote !== 'single') {
+      escaped = true;
+      continue;
+    }
+    if (char === "'" && quote !== 'double') {
+      quote = quote === 'single' ? null : 'single';
+      continue;
+    }
+    if (char === '"' && quote !== 'single') {
+      quote = quote === 'double' ? null : 'double';
+      continue;
+    }
+    if (/\s/.test(char) && !quote) {
+      if (current) {
+        words.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += char;
+  }
+
+  if (current) words.push(current);
+  return words;
+}
+
+interface ShellStatementRecord {
+  text: string;
+  subshellDepth: number;
+  closesSubshells: number;
+}
+
+function shellStatementRecords(command: string): ShellStatementRecord[] {
+  const statements: ShellStatementRecord[] = [];
+  let current = '';
+  let quote: 'single' | 'double' | null = null;
+  let escaped = false;
+  let subshellDepth = 0;
+  let statementSubshellDepth = 0;
+  let closesSubshells = 0;
+
+  const pushStatement = () => {
+    const statement = current.trim();
+    if (statement) {
+      statements.push({
+        text: statement,
+        subshellDepth: statementSubshellDepth,
+        closesSubshells,
+      });
+    }
+    current = '';
+    statementSubshellDepth = subshellDepth;
+    closesSubshells = 0;
+  };
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    const next = command[index + 1];
+
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && quote !== 'single') {
+      current += char;
+      escaped = true;
+      continue;
+    }
+    if (char === "'" && quote !== 'double') {
+      current += char;
+      quote = quote === 'single' ? null : 'single';
+      continue;
+    }
+    if (char === '"' && quote !== 'single') {
+      current += char;
+      quote = quote === 'double' ? null : 'double';
+      continue;
+    }
+
+    if (!quote && char === '(' && !current.trim()) {
+      subshellDepth += 1;
+      statementSubshellDepth = subshellDepth;
+      current += char;
+      continue;
+    }
+
+    current += char;
+
+    if (!quote && char === ')' && subshellDepth > 0) {
+      subshellDepth -= 1;
+      closesSubshells += 1;
+      continue;
+    }
+
+    if (!quote && (char === '\n' || char === ';' || (char === '&' && next === '&') || (char === '|' && next === '|'))) {
+      current = current.slice(0, -1);
+      pushStatement();
+      if ((char === '&' && next === '&') || (char === '|' && next === '|')) index += 1;
+      continue;
+    }
+  }
+
+  pushStatement();
+  return statements;
+}
+
+function shellStatements(command: string): string[] {
+  return shellStatementRecords(command).map((statement) => statement.text);
+}
+
+function isShellName(name: string): boolean {
+  return /^(?:sh|bash|dash|zsh|ksh|fish)$/.test(name);
+}
+
+function isScriptInterpreterName(name: string): boolean {
+  return /^(?:python[0-9.]?|python3(?:\.[0-9]+)?|node|ruby|perl|php|lua|deno|bun)$/.test(name);
+}
+
+function isProtectedArtifactPath(path: string): boolean {
+  return /^(?:\.\/)?\.omx\/(?:context|specs)\/[^"'\s;|&<>]+$/.test(path);
+}
+
+function resolveCommandOperand(cwd: string, operand: string): string {
+  return joinShellPath(cwd, operand.replace(/^\.\//, ''));
+}
+
+function shellScriptOperand(args: string[], cwd: string, targetPath: string): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const word = args[index]!;
+    if (word === '--') {
+      const operand = args[index + 1];
+      return Boolean(operand && sameShellPath(resolveCommandOperand(cwd, operand), targetPath));
+    }
+    if (word === '-c' || word === '--command') {
+      const inlineCommand = args[index + 1];
+      return Boolean(inlineCommand && hasTokenizedExecutionOfPath(inlineCommand, targetPath, cwd));
+    }
+    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(word)) {
+      const inlineCommand = args[index + 1];
+      return Boolean(inlineCommand && hasTokenizedExecutionOfPath(inlineCommand, targetPath, cwd));
+    }
+    if (word === '-o' || word === '+o' || word === '-O' || word === '+O' || word === '--init-file' || word === '--rcfile') {
+      index += 1;
+      continue;
+    }
+    if (word.startsWith('--init-file=') || word.startsWith('--rcfile=')) continue;
+    if (word.startsWith('-') || word.startsWith('+')) continue;
+    return sameShellPath(resolveCommandOperand(cwd, word), targetPath);
+  }
+  return false;
+}
+
+function shellExecutionMatches(words: string[], cwd: string, targetPath: string): boolean {
+  if (words.length === 0) return false;
+  const commandName = words[0]!;
+
+  if (commandName === 'source' || commandName === '.') {
+    const operand = words[1];
+    return Boolean(operand && sameShellPath(resolveCommandOperand(cwd, operand), targetPath));
+  }
+
+  if (isShellName(commandName)) {
+    return shellScriptOperand(words.slice(1), cwd, targetPath);
+  }
+
+  if (isScriptInterpreterName(commandName)) {
+    return shellScriptOperand(words.slice(1), cwd, targetPath);
+  }
+
+  if (commandName.startsWith('./') || commandName.includes('/')) {
+    return sameShellPath(resolveCommandOperand(cwd, commandName), targetPath);
+  }
+
+  return false;
+}
+
+function findDirectWrapperOperandIndex(words: string[], startIndex: number): number | null {
+  for (let index = startIndex; index < words.length; index += 1) {
+    const word = words[index]!;
+    if (!word || word === '--' || /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(word)) continue;
+    if (word.startsWith('-')) continue;
+    return index;
+  }
+  return null;
+}
+
+function findTimeWrapperOperandIndex(words: string[], startIndex: number): number | null {
+  for (let index = startIndex; index < words.length; index += 1) {
+    const word = words[index]!;
+    if (!word || word === '--' || /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(word)) continue;
+    if (word === '-f' || word === '--format' || word === '-o' || word === '--output') {
+      index += 1;
+      continue;
+    }
+    if (word.startsWith('--format=') || word.startsWith('--output=')) continue;
+    if (word.startsWith('-')) continue;
+    return index;
+  }
+  return null;
+}
+
+function findTimeoutWrapperOperandIndex(words: string[], startIndex: number): number | null {
+  let sawDuration = false;
+  for (let index = startIndex; index < words.length; index += 1) {
+    const word = words[index]!;
+    if (!word || word === '--' || /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(word)) continue;
+    if (word === '-k' || word === '--kill-after' || word === '-s' || word === '--signal') {
+      index += 1;
+      continue;
+    }
+    if (word.startsWith('--kill-after=') || word.startsWith('--signal=')) continue;
+    if (word.startsWith('-')) continue;
+    if (!sawDuration) {
+      sawDuration = true;
+      continue;
+    }
+    return index;
+  }
+  return null;
+}
+
+function unwrapExecutionCommand(words: string[], cwd: string): { words: string[]; cwd: string } {
+  let currentWords = words;
+  let currentCwd = cwd;
+  for (let unwrapCount = 0; unwrapCount < 8; unwrapCount += 1) {
+    const commandName = currentWords[0];
+    if (commandName === 'env') {
+      const unwrapped = unwrapEnvCommand(currentWords, currentCwd);
+      if (unwrapped.words === currentWords) return unwrapped;
+      currentWords = unwrapped.words;
+      currentCwd = unwrapped.cwd;
+      continue;
+    }
+
+    const operandIndex = commandName === 'command' || commandName === 'nohup' || commandName === 'setsid'
+      ? findDirectWrapperOperandIndex(currentWords, 1)
+      : commandName === 'time'
+        ? findTimeWrapperOperandIndex(currentWords, 1)
+        : commandName === 'timeout' || commandName === 'gtimeout'
+          ? findTimeoutWrapperOperandIndex(currentWords, 1)
+          : null;
+    if (operandIndex === null) return { words: currentWords, cwd: currentCwd };
+    currentWords = currentWords.slice(operandIndex);
+  }
+
+  return { words: currentWords, cwd: currentCwd };
+}
+
+function unwrapCdCommandWords(words: string[]): string[] {
+  let currentWords = words;
+  for (let unwrapCount = 0; unwrapCount < 4; unwrapCount += 1) {
+    const commandName = currentWords[0];
+    if (commandName === 'command') {
+      const operandIndex = findDirectWrapperOperandIndex(currentWords, 1);
+      if (operandIndex === null) return currentWords;
+      currentWords = currentWords.slice(operandIndex);
+      continue;
+    }
+    if (commandName === 'builtin') {
+      currentWords = currentWords.slice(1);
+      continue;
+    }
+    return currentWords;
+  }
+  return currentWords;
+}
+
+function cdOperand(words: string[]): string | null {
+  if (words[0] !== 'cd') return null;
+  for (let index = 1; index < words.length; index += 1) {
+    const word = words[index]!;
+    if (word === '--') continue;
+    if (/^-[LP]+$/.test(word)) continue;
+    return word;
+  }
+  return null;
+}
+
+function cdTransitionTarget(words: string[], cwd: string): string | null {
+  const operand = cdOperand(unwrapCdCommandWords(words));
+  return operand ? resolveCommandOperand(cwd, operand) : null;
+}
+
+function unwrapEnvCommand(words: string[], cwd: string): { words: string[]; cwd: string } {
+  if (words[0] !== 'env') return { words, cwd };
+
+  let index = 1;
+  let envCwd = cwd;
+  while (index < words.length) {
+    const word = words[index]!;
+    if (word === '--') {
+      index += 1;
+      break;
+    }
+    if (word === '-C' || word === '--chdir') {
+      const next = words[index + 1];
+      if (!next) return { words: [], cwd: envCwd };
+      envCwd = resolveCommandOperand(envCwd, next);
+      index += 2;
+      continue;
+    }
+    if (word.startsWith('-C') && word.length > 2) {
+      envCwd = resolveCommandOperand(envCwd, word.slice(2));
+      index += 1;
+      continue;
+    }
+    if (word.startsWith('--chdir=')) {
+      envCwd = resolveCommandOperand(envCwd, word.slice('--chdir='.length));
+      index += 1;
+      continue;
+    }
+    if (word.startsWith('-')) {
+      index += 1;
+      continue;
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=.*/.test(word)) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+
+  return { words: words.slice(index), cwd: envCwd };
+}
+
+function groupedShellWords(statement: string): string[] {
+  const words = shellWords(statement);
+  while (words.length > 0) {
+    const first = words[0]!;
+    if (first === '{') {
+      words.shift();
+      continue;
+    }
+    const stripped = first.replace(/^\(+/, '');
+    if (stripped !== first) {
+      if (stripped) words[0] = stripped;
+      else words.shift();
+      continue;
+    }
+    break;
+  }
+
+  while (words.length > 0) {
+    const lastIndex = words.length - 1;
+    const last = words[lastIndex]!;
+    if (last === '}') {
+      words.pop();
+      continue;
+    }
+    const stripped = last.replace(/[)}]+$/, '');
+    if (stripped !== last) {
+      if (stripped) words[lastIndex] = stripped;
+      else words.pop();
+      continue;
+    }
+    break;
+  }
+
+  return words;
+}
+
+function scopedCwd(cwds: Map<number, string>, depth: number, initialCwd: string): string {
+  if (cwds.has(depth)) return cwds.get(depth)!;
+  if (depth <= 0) return initialCwd;
+  return scopedCwd(cwds, depth - 1, initialCwd);
+}
+
+function hasTokenizedExecutionOfPath(command: string, path: string, initialCwd = ''): boolean {
+  const targetPath = normalizeShellPath(path);
+  const cwds = new Map<number, string>([[0, initialCwd]]);
+  for (const statement of shellStatementRecords(command)) {
+    const cwd = scopedCwd(cwds, statement.subshellDepth, initialCwd);
+    const words = groupedShellWords(statement.text);
+    if (words.length > 0) {
+      const cdTarget = cdTransitionTarget(words, cwd);
+      if (cdTarget) {
+        cwds.set(statement.subshellDepth, cdTarget);
+      } else {
+        const unwrapped = unwrapExecutionCommand(words, cwd);
+        if (shellExecutionMatches(unwrapped.words, unwrapped.cwd, targetPath)) return true;
+      }
+    }
+
+    if (statement.closesSubshells > 0) {
+      for (let depth = statement.subshellDepth; depth > statement.subshellDepth - statement.closesSubshells; depth -= 1) {
+        cwds.delete(depth);
+      }
+    }
+  }
+  return false;
+}
+
+function collectProtectedArtifactWritePaths(command: string): Set<string> {
+  const paths = new Set<string>();
+  const protectedPath = String.raw`(["']?)((?:\.\/)?\.omx\/(?:context|specs)\/[^"'\s;|&<>]+)\1`;
+  const redirectPattern = new RegExp(String.raw`(?:^|[^<])>>?\s*${protectedPath}`, 'g');
+
+  for (const match of command.matchAll(redirectPattern)) {
+    const path = match[2]?.trim();
+    if (path) paths.add(normalizeProtectedArtifactPath(path));
+  }
+
+  for (const statement of shellStatements(command)) {
+    const words = shellWords(statement);
+    const teeIndex = words.findIndex((word) => word === 'tee');
+    if (teeIndex === -1) continue;
+    for (let index = teeIndex + 1; index < words.length; index += 1) {
+      const word = words[index]!;
+      if (word === '--') continue;
+      if (word.startsWith('-')) continue;
+      if (isProtectedArtifactPath(word)) paths.add(normalizeProtectedArtifactPath(word));
+    }
+  }
+
+  return paths;
+}
+
+function executesOrSourcesPath(command: string, path: string): boolean {
+  const escapedPath = escapeRegExp(path);
+  const optionalDotSlashPath = String.raw`(?:\.\/)?${escapedPath}`;
+  const quotedPath = String.raw`["']${optionalDotSlashPath}["']|${optionalDotSlashPath}`;
+  const shellExecPattern = new RegExp(
+    String.raw`(?:^|[\s;&|()])(?:sh|bash|dash|zsh|ksh|fish)\s+(?:-[^\s]+\s+)*(${quotedPath})(?:$|[\s;&|)])`,
+  );
+  const sourcePattern = new RegExp(
+    String.raw`(?:^|[\s;&|()])(?:source|\.)\s+(${quotedPath})(?:$|[\s;&|)])`,
+  );
+  const directExecPattern = new RegExp(
+    String.raw`(?:^|[;&|()\n])\s*(?:\.\/)?${escapedPath}(?:$|[\s;&|)])`,
+  );
+  return shellExecPattern.test(command)
+    || sourcePattern.test(command)
+    || directExecPattern.test(command)
+    || hasTokenizedExecutionOfPath(command, path);
+}
+
+function hasSameCommandProtectedArtifactExecution(command: string): boolean {
+  for (const path of collectProtectedArtifactWritePaths(command)) {
+    if (executesOrSourcesPath(command, path)) return true;
+  }
+  return false;
+}
+
 export const PLANNING_GATE_BYPASS_TTL_MS = 10 * 60 * 1000;
 
 export const BYPASS_PLANNING_GATE_PHRASE = 'bypass planning gate';
@@ -36,7 +518,8 @@ export const BYPASS_PLANNING_GATE_PHRASE = 'bypass planning gate';
 export function isImplementationToolCall(input: PreToolUseGateInput): boolean {
   if (IMPLEMENTATION_TOOLS.has(input.tool_name)) return true;
   if (input.tool_name === 'Bash' && typeof input.tool_input === 'string') {
-    return DENIED_BASH_PATTERNS.some((pattern) => pattern.test(input.tool_input!));
+    return DENIED_BASH_PATTERNS.some((pattern) => pattern.test(input.tool_input!))
+      || hasSameCommandProtectedArtifactExecution(input.tool_input);
   }
   return false;
 }

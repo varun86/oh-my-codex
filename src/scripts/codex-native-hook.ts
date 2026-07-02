@@ -3825,11 +3825,117 @@ function normalizeCommandDirectoryTarget(rawPath: string): string | null {
   return trimmed;
 }
 
+function resolveSimpleCdCommandCwd(currentCwd: string, words: string[]): string | null {
+  const commandIndex = findWrappedCommandPositionIndex(words, 0);
+  if (commandIndex === null || shellWordBaseName(words[commandIndex] ?? "") !== "cd") return null;
+
+  for (let index = commandIndex + 1; index < words.length; index += 1) {
+    const word = words[index] ?? "";
+    if (!word || word === "--") continue;
+    if (word === "-L" || word === "-P" || word === "-e") continue;
+    if (word.startsWith("-")) return null;
+
+    const normalizedTarget = normalizeCommandDirectoryTarget(word);
+    if (normalizedTarget === null) return null;
+    try {
+      return resolve(currentCwd, normalizedTarget);
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
 function isEnvCwdChangingOption(word: string): boolean {
   return word === "-C"
     || word === "--chdir"
     || word.startsWith("--chdir=")
     || /^-C.+/.test(word);
+}
+
+interface WrappedCommandExecutionContext {
+  index: number;
+  cwd: string;
+}
+
+function resolveEnvWrappedCommandCwd(currentCwd: string, words: string[], envWordIndex: number, operandIndex: number): string | null {
+  let effectiveCwd = currentCwd;
+  for (let index = envWordIndex + 1; index < operandIndex; index += 1) {
+    const word = words[index] ?? "";
+    if (!word || word === "--" || isShellAssignmentWord(word)) continue;
+    if (word === "-S" || word === "--split-string" || word.startsWith("-S") || word.startsWith("--split-string=")) return null;
+    if (word === "-u" || word === "--unset" || word === "-a" || word === "--argv0") {
+      index += 1;
+      continue;
+    }
+    if (word.startsWith("--unset=") || word.startsWith("--argv0=") || /^-u.+/.test(word) || /^-a.+/.test(word)) continue;
+    if (isEnvCwdChangingOption(word)) {
+      let target = "";
+      if (word === "-C" || word === "--chdir") {
+        target = words[index + 1] ?? "";
+        index += 1;
+      } else if (word.startsWith("--chdir=")) {
+        target = word.slice("--chdir=".length);
+      } else if (word.startsWith("-C") && word.length > 2) {
+        target = word.slice(2);
+      }
+      const normalizedTarget = normalizeCommandDirectoryTarget(target);
+      if (normalizedTarget === null) return null;
+      try {
+        effectiveCwd = resolve(effectiveCwd, normalizedTarget);
+      } catch {
+        return null;
+      }
+    }
+  }
+  return effectiveCwd;
+}
+
+function resolveWrappedCommandExecutionContext(words: string[], currentCwd: string, startIndex = 0): WrappedCommandExecutionContext | null {
+  let commandWordIndex = skipShellCommandPositionPrefixWords(words, startIndex);
+  let effectiveCwd = currentCwd;
+  for (let unwrapCount = 0; unwrapCount < 8; unwrapCount += 1) {
+    const commandWord = words[commandWordIndex] ?? "";
+    if (!commandWord) return null;
+
+    const commandWordBase = shellWordBaseName(commandWord);
+    const operandIndex =
+      commandWordBase === "env"
+        ? findEnvDispatchOperandIndex(words, commandWordIndex + 1)
+        : commandWordBase === "command"
+          ? findCommandDispatchOperandIndex(words, commandWordIndex + 1)
+          : commandWordBase === "exec"
+            ? findExecDispatchOperandIndex(words, commandWordIndex + 1)
+            : commandWordBase === "time"
+              ? findTimeDispatchOperandIndex(words, commandWordIndex + 1)
+              : commandWordBase === "timeout"
+                ? findTimeoutDispatchOperandIndex(words, commandWordIndex + 1)
+                : commandWordBase === "nohup" || commandWordBase === "setsid"
+                  ? findCommandDispatchOperandIndex(words, commandWordIndex + 1)
+                  : commandWordBase === "coproc"
+                    ? findCoprocDispatchOperandIndex(words, commandWordIndex + 1)
+                    : commandWordBase === "xargs"
+                      ? findXargsDispatchOperandIndex(words, commandWordIndex + 1)
+                      : commandWordBase === "nice"
+                        ? findNiceDispatchOperandIndex(words, commandWordIndex + 1)
+                        : commandWordBase === "stdbuf"
+                          ? findStdbufDispatchOperandIndex(words, commandWordIndex + 1)
+                          : null;
+    if (operandIndex === null) return { index: commandWordIndex, cwd: effectiveCwd };
+
+    if (commandWordBase === "env") {
+      const envCwd = resolveEnvWrappedCommandCwd(effectiveCwd, words, commandWordIndex, operandIndex);
+      if (envCwd === null) return null;
+      effectiveCwd = envCwd;
+    }
+
+    const nextCommandWordIndex = skipShellCommandPositionPrefixWords(words, operandIndex);
+    if (nextCommandWordIndex === commandWordIndex) return { index: commandWordIndex, cwd: effectiveCwd };
+    commandWordIndex = nextCommandWordIndex;
+  }
+
+  return null;
 }
 
 function resolveStateWriteInputFileCwd(cwd: string, commandPrefix: string): string | null {
@@ -4026,39 +4132,48 @@ function firstShellScriptOperand(words: string[], shellWordIndex: number): strin
 }
 
 function sourcesFileWrittenEarlierInSameCommand(cwd: string, command: string): boolean {
-  const scanCommand = (currentCommand: string, activeCommands: Set<string>, writtenTargets: Set<string>): boolean => {
+  const scanCommand = (currentCwd: string, currentCommand: string, activeCommands: Set<string>, writtenTargets: Set<string>): boolean => {
     const normalizedCommand = stripHeredocBodiesForCommandScan(normalizeShellLineContinuations(currentCommand));
-    const commandKey = normalizedCommand.trim();
-    if (!commandKey || activeCommands.has(commandKey)) return false;
+    const commandKey = `${currentCwd}\0${normalizedCommand.trim()}`;
+    if (!normalizedCommand.trim() || activeCommands.has(commandKey)) return false;
 
     const assignments = extractCommandLiteralAssignments(normalizedCommand);
     const nextActiveCommands = new Set(activeCommands);
     nextActiveCommands.add(commandKey);
+    let effectiveCwd = currentCwd;
 
     for (const segment of splitShellCommandSegments(normalizedCommand)) {
       const words = tokenizeShellWords(segment);
+      const cdCwd = resolveSimpleCdCommandCwd(effectiveCwd, words);
+      if (cdCwd !== null) {
+        effectiveCwd = cdCwd;
+        continue;
+      }
+
+      const wrappedCommandContext = resolveWrappedCommandExecutionContext(words, effectiveCwd);
+
       for (let index = 0; index < words.length; index += 1) {
         const word = words[index] ?? "";
+        const operandCwd = wrappedCommandContext && index >= wrappedCommandContext.index ? wrappedCommandContext.cwd : effectiveCwd;
         const operand = word === "source" || word === "."
-          ? normalizeSameCommandScriptTarget(cwd, firstNonOptionSourceOperand(words, index), assignments)
+          ? normalizeSameCommandScriptTarget(operandCwd, firstNonOptionSourceOperand(words, index), assignments)
           : isNestedShellCommandWord(word)
-            ? normalizeSameCommandScriptTarget(cwd, firstShellScriptOperand(words, index), assignments)
+            ? normalizeSameCommandScriptTarget(operandCwd, firstShellScriptOperand(words, index), assignments)
             : null;
         if (operand && writtenTargets.has(operand)) return true;
       }
 
-      const commandWordIndex = findWrappedCommandPositionIndex(words, 0);
-      const directExecutionTarget = commandWordIndex === null
+      const directExecutionTarget = wrappedCommandContext === null
         ? null
-        : normalizeSameCommandScriptTarget(cwd, words[commandWordIndex] ?? "", assignments);
+        : normalizeSameCommandScriptTarget(wrappedCommandContext.cwd, words[wrappedCommandContext.index] ?? "", assignments);
       if (directExecutionTarget && writtenTargets.has(directExecutionTarget)) return true;
 
       for (const nestedCommand of extractNestedShellCommandStringsForStateScan(segment)) {
-        if (scanCommand(nestedCommand, nextActiveCommands, writtenTargets)) return true;
+        if (scanCommand(effectiveCwd, nestedCommand, nextActiveCommands, writtenTargets)) return true;
       }
 
       for (const target of extractDeepInterviewCommandWriteTargets(segment)) {
-        const normalizedTarget = normalizeSameCommandScriptTarget(cwd, target, assignments);
+        const normalizedTarget = normalizeSameCommandScriptTarget(effectiveCwd, target, assignments);
         if (normalizedTarget) writtenTargets.add(normalizedTarget);
       }
     }
@@ -4066,7 +4181,7 @@ function sourcesFileWrittenEarlierInSameCommand(cwd: string, command: string): b
     return false;
   };
 
-  return scanCommand(command, new Set(), new Set());
+  return scanCommand(cwd, command, new Set(), new Set());
 }
 
 
@@ -5019,7 +5134,7 @@ function findWrappedCommandPositionIndex(words: string[], startIndex: number): n
     const operandIndex =
       commandWordBase === "env"
         ? findEnvDispatchOperandIndex(words, commandWordIndex + 1)
-        : commandWordBase === "command"
+        : commandWordBase === "command" || commandWordBase === "builtin"
           ? findCommandDispatchOperandIndex(words, commandWordIndex + 1)
           : commandWordBase === "exec"
             ? findExecDispatchOperandIndex(words, commandWordIndex + 1)
@@ -5027,7 +5142,7 @@ function findWrappedCommandPositionIndex(words: string[], startIndex: number): n
               ? findTimeDispatchOperandIndex(words, commandWordIndex + 1)
               : commandWordBase === "timeout"
                 ? findTimeoutDispatchOperandIndex(words, commandWordIndex + 1)
-                : commandWordBase === "nohup"
+                : commandWordBase === "nohup" || commandWordBase === "setsid"
                   ? findCommandDispatchOperandIndex(words, commandWordIndex + 1)
                   : commandWordBase === "coproc"
                     ? findCoprocDispatchOperandIndex(words, commandWordIndex + 1)
@@ -5991,6 +6106,7 @@ function isAllowedDeepInterviewRalplanHandoffCommand(cwd: string, command: strin
   if (findUnquotedOmxStateCommandIndexes(canonicalCommand, "clear").length > 0) return false;
   if (hasDynamicNestedShellExecution(canonicalCommand)) return false;
   if (commandHasUntargetedPlanningForbiddenIntent(canonicalCommand)) return false;
+  if (sourcesFileWrittenEarlierInSameCommand(cwd, canonicalCommand)) return false;
   const stateWriteOperations = collectOmxStateCommandOperations(canonicalCommand, "write");
   if (stateWriteOperations.length !== 1) return false;
   const stateWriteOperation = stateWriteOperations[0];
