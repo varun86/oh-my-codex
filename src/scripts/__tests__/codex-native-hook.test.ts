@@ -994,6 +994,109 @@ describe("codex native hook dispatch", () => {
         { cwd },
       );
       assert.equal(allowedQuotedMention.outputJson, null);
+
+      const allowedPythonPlanningArtifactWrite = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          session_id: sessionId,
+          thread_id: "thread-ralplan-wrapper-implementation-block",
+          tool_name: "Bash",
+          tool_use_id: "tool-ralplan-wrapper-python-planning-artifact",
+          tool_input: {
+            command: `python3 - <<'PY'
+from pathlib import Path
+Path('.omx/plans').mkdir(parents=True, exist_ok=True)
+Path('.omx/plans/rebase-pr3010-ultragoal-fix-plan.md').write_text('planning text')
+PY`,
+          },
+        },
+        { cwd },
+      );
+      assert.equal(allowedPythonPlanningArtifactWrite.outputJson, null);
+
+      const blockedPythonPlanningArtifactExecution = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          session_id: sessionId,
+          thread_id: "thread-ralplan-wrapper-implementation-block",
+          tool_name: "Bash",
+          tool_use_id: "tool-ralplan-wrapper-python-planning-artifact-exec",
+          tool_input: {
+            command: `python3 - <<'PY'
+from pathlib import Path
+Path('.omx/plans/run.sh').write_text('echo ran')
+PY
+sh .omx/plans/run.sh`,
+          },
+        },
+        { cwd },
+      );
+      assert.equal(blockedPythonPlanningArtifactExecution.outputJson && typeof blockedPythonPlanningArtifactExecution.outputJson === "object" ? (blockedPythonPlanningArtifactExecution.outputJson as { decision?: string }).decision : undefined, "block");
+      assert.match(JSON.stringify(blockedPythonPlanningArtifactExecution.outputJson), /same-command|Bash write intent|implementation/i);
+
+      const blockedPythonAllowedMkdirDynamicSourceWrite = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          session_id: sessionId,
+          thread_id: "thread-ralplan-wrapper-implementation-block",
+          tool_name: "Bash",
+          tool_use_id: "tool-ralplan-wrapper-python-allowed-mkdir-dynamic-source-write",
+          tool_input: {
+            command: `python3 - <<'PY'
+from pathlib import Path
+Path('.omx/plans').mkdir(parents=True, exist_ok=True)
+(Path('src') / 'generated.ts').write_text('implementation')
+PY`,
+          },
+        },
+        { cwd },
+      );
+      assert.equal(blockedPythonAllowedMkdirDynamicSourceWrite.outputJson && typeof blockedPythonAllowedMkdirDynamicSourceWrite.outputJson === "object" ? (blockedPythonAllowedMkdirDynamicSourceWrite.outputJson as { decision?: string }).decision : undefined, "block");
+      assert.match(JSON.stringify(blockedPythonAllowedMkdirDynamicSourceWrite.outputJson), /write intent did not identify an allowed planning artifact path/);
+
+      const blockedPythonSourceWrite = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          session_id: sessionId,
+          thread_id: "thread-ralplan-wrapper-implementation-block",
+          tool_name: "Bash",
+          tool_use_id: "tool-ralplan-wrapper-python-source-write",
+          tool_input: {
+            command: `python3 - <<'PY'
+from pathlib import Path
+Path('src/generated.ts').write_text('implementation')
+PY`,
+          },
+        },
+        { cwd },
+      );
+      assert.equal(blockedPythonSourceWrite.outputJson && typeof blockedPythonSourceWrite.outputJson === "object" ? (blockedPythonSourceWrite.outputJson as { decision?: string }).decision : undefined, "block");
+      assert.match(JSON.stringify(blockedPythonSourceWrite.outputJson), /Bash .* target src\/generated\.ts/);
+
+      const blockedPythonMixedWrite = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          session_id: sessionId,
+          thread_id: "thread-ralplan-wrapper-implementation-block",
+          tool_name: "Bash",
+          tool_use_id: "tool-ralplan-wrapper-python-mixed-write",
+          tool_input: {
+            command: `python3 - <<'PY'
+from pathlib import Path
+Path('.omx/plans/rebase-pr3010-ultragoal-fix-plan.md').write_text('planning text')
+Path('src/generated.ts').write_text('implementation')
+PY`,
+          },
+        },
+        { cwd },
+      );
+      assert.equal(blockedPythonMixedWrite.outputJson && typeof blockedPythonMixedWrite.outputJson === "object" ? (blockedPythonMixedWrite.outputJson as { decision?: string }).decision : undefined, "block");
+      assert.match(JSON.stringify(blockedPythonMixedWrite.outputJson), /Bash .* target src\/generated\.ts/);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -7173,6 +7276,29 @@ exit 0
       assert.equal((blockedHandoffWithSameCommandArtifactExecution.outputJson as { decision?: string } | null)?.decision, "block");
       assert.match(String((blockedHandoffWithSameCommandArtifactExecution.outputJson as { reason?: string } | null)?.reason ?? ""), /same-command|Bash write intent|handoff/i);
 
+      const blockedHandoffWithPythonSameCommandArtifactExecution = await preToolUse(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          session_id: "sess-di-artifact",
+          tool_name: "Bash",
+          tool_use_id: "tool-di-reported-handoff-with-python-artifact-exec",
+          tool_input: {
+            command: [
+              "python3 - <<'PY'",
+              "from pathlib import Path",
+              "Path('.omx/context/run.sh').write_text('echo ran')",
+              "PY",
+              "sh .omx/context/run.sh",
+              `omx state write --input '${deepInterviewRalplanHandoffState}' --json`,
+            ].join("\n"),
+          },
+        },
+        { cwd },
+      );
+      assert.equal((blockedHandoffWithPythonSameCommandArtifactExecution.outputJson as { decision?: string } | null)?.decision, "block");
+      assert.match(String((blockedHandoffWithPythonSameCommandArtifactExecution.outputJson as { reason?: string } | null)?.reason ?? ""), /same-command|Bash write intent|handoff/i);
+
       for (const [toolUseId, artifactDir, scriptName, executionLine] of [
         [
           "tool-di-reported-handoff-with-cd-relative-sh-exec",
@@ -10225,6 +10351,44 @@ exit 0
         { cwd },
       );
       assert.equal(allowedSpecEdit.outputJson, null);
+
+      const allowedPythonPlanWrite = await preToolUse("Bash", "tool-autopilot-ralplan-python-plan-write", {
+        command: `python3 - <<'PY'
+from pathlib import Path
+Path('.omx/plans').mkdir(parents=True, exist_ok=True)
+Path('.omx/plans/rebase-pr3010-ultragoal-fix-plan.md').write_text('planning text')
+PY`,
+      });
+      assert.equal(allowedPythonPlanWrite.outputJson, null);
+
+      const blockedPythonAllowedMkdirDynamicSourceWrite = await preToolUse("Bash", "tool-autopilot-ralplan-python-allowed-mkdir-dynamic-source-write", {
+        command: `python3 - <<'PY'
+from pathlib import Path
+Path('.omx/plans').mkdir(parents=True, exist_ok=True)
+(Path('src') / 'generated.ts').write_text('implementation')
+PY`,
+      });
+      assert.equal((blockedPythonAllowedMkdirDynamicSourceWrite.outputJson as { decision?: string } | null)?.decision, "block");
+      assert.match(String((blockedPythonAllowedMkdirDynamicSourceWrite.outputJson as { reason?: string } | null)?.reason ?? ""), /write intent did not identify an allowed planning artifact path/);
+
+      const blockedPythonSourceWrite = await preToolUse("Bash", "tool-autopilot-ralplan-python-source-write", {
+        command: `python3 - <<'PY'
+from pathlib import Path
+Path('src/generated.ts').write_text('implementation')
+PY`,
+      });
+      assert.equal((blockedPythonSourceWrite.outputJson as { decision?: string } | null)?.decision, "block");
+      assert.match(String((blockedPythonSourceWrite.outputJson as { reason?: string } | null)?.reason ?? ""), /src\/generated\.ts/);
+
+      const blockedPythonMixedWrite = await preToolUse("Bash", "tool-autopilot-ralplan-python-mixed-write", {
+        command: `python3 - <<'PY'
+from pathlib import Path
+Path('.omx/plans/rebase-pr3010-ultragoal-fix-plan.md').write_text('planning text')
+Path('src/generated').mkdir(parents=True, exist_ok=True)
+PY`,
+      });
+      assert.equal((blockedPythonMixedWrite.outputJson as { decision?: string } | null)?.decision, "block");
+      assert.match(String((blockedPythonMixedWrite.outputJson as { reason?: string } | null)?.reason ?? ""), /src\/generated/);
 
       const blockedImplementationEdit = await dispatchCodexNativeHook(
         {
