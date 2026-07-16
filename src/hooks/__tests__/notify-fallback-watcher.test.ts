@@ -250,20 +250,12 @@ if [[ "$cmd" == "list-panes" && "$#" -eq 3 && "$1" == "-a" && "$2" == "-F" && "$
   ${options.ralphPane ? `printf '${options.ralphPane.paneId.replace('%', '%%')}\\t0\\t${options.ralphPane.panePid}\\n'` : ''}
   exit 0
 fi
+if [[ "$cmd" == "show-option" && "\${@: -1}" == "@omx_ralph_pane_owner_id" ]]; then
+  printf '%s\n' '${options.ralphPane?.paneOwner ?? options.paneOwner ?? 'ralph:owner'}'
+  exit 0
+fi
 if [[ "$cmd" == "show-option" && "\${@: -1}" == "@omx_team_pane_owner_id" ]]; then
-  target=""
-  for ((i = 1; i <= $#; i++)); do
-    if [[ "\${!i}" == "-t" ]]; then
-      j=$((i + 1))
-      target="\${!j}"
-      break
-    fi
-  done
-  if [[ "$target" == "${options.ralphPane?.paneId ?? ''}" ]]; then
-    printf '%s\n' '${options.ralphPane?.paneOwner ?? ''}'
-  else
-    printf '%s\n' '${options.paneOwner ?? 'team:dispatch-team'}'
-  fi
+  printf '%s\n' '${options.paneOwner ?? 'team:dispatch-team'}'
   exit 0
 fi
 if [[ "$cmd" == "capture-pane" ]]; then
@@ -2210,6 +2202,9 @@ exit 0
       [{ tmux_pane_pid: 4242, tmux_session_name: 'session-test', tmux_pane_owner_id: 'team:dispatch-team' }, { paneOwner: 'team:dispatch-team' }],
       [{ tmux_pane_pid: 4242, tmux_session_name: 'session-test', tmux_pane_owner_id: 'ralph:owner' }, { paneOwner: 'ralph:owner', paneSession: 'other-session' }],
       [{ tmux_pane_pid: 4242, tmux_session_name: 'session-test', tmux_pane_owner_id: 'ralph:owner' }, { paneOwner: 'ralph:other' }],
+      [{ tmux_pane_pid: 4242.9, tmux_session_name: 'session-test', tmux_pane_owner_id: 'ralph:owner' }, { paneOwner: 'ralph:owner' }],
+      [{ tmux_pane_pid: '4.242e3', tmux_session_name: 'session-test', tmux_pane_owner_id: 'ralph:owner' }, { paneOwner: 'ralph:owner' }],
+      [{ tmux_pane_pid: '9007199254740992', tmux_session_name: 'session-test', tmux_pane_owner_id: 'ralph:owner' }, { paneOwner: 'ralph:owner' }],
     ] as const;
     const watcherScript = new URL('../../../dist/scripts/notify-fallback-watcher.js', import.meta.url).pathname;
     const notifyHook = new URL('../../../dist/scripts/notify-hook.js', import.meta.url).pathname;

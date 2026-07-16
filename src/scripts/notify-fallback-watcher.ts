@@ -40,6 +40,7 @@ import { TEAM_NAME_SAFE_PATTERN } from '../team/contracts.js';
 import { shouldContinueRun } from '../runtime/run-loop.js';
 import { deliverNotifyFallback, compactNotifyFallbackDeliveries, NOTIFY_FALLBACK_LEASE_MS } from './notify-fallback-delivery.js';
 import { readExactPaneProofSync } from '../team/exact-pane.js';
+import { OMX_RALPH_PANE_OWNER_OPTION } from '../state/mode-state-context.js';
 
 function argValue(name: string, fallback = ''): string {
   const idx = process.argv.indexOf(name);
@@ -72,8 +73,12 @@ function normalizeValidTeamName(value: unknown): string {
 }
 
 function parsePositivePid(value: unknown): number | null {
-  const pid = Math.trunc(asNumber(value as string | number | undefined, 0));
-  return pid > 0 ? pid : null;
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0 ? value : null;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!/^[1-9][0-9]*$/.test(trimmed)) return null;
+  const pid = Number(trimmed);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
 }
 
 function parseIsoMillis(value: string | null | undefined): number | null {
@@ -797,7 +802,7 @@ function requireFrozenRalphPaneBinding(binding: RalphContinuePaneBinding): void 
   if (session.error || session.status !== 0 || safeString(session.stdout).trim() !== binding.sessionName) {
     throw new Error(`persisted Ralph pane session changed: ${binding.paneId}`);
   }
-  const owner = spawnPlatformCommandSync('tmux', ['show-option', '-qv', '-p', '-t', binding.paneId, '@omx_team_pane_owner_id'], { encoding: 'utf-8' }).result;
+  const owner = spawnPlatformCommandSync('tmux', ['show-option', '-qv', '-p', '-t', binding.paneId, OMX_RALPH_PANE_OWNER_OPTION], { encoding: 'utf-8' }).result;
   if (owner.error || owner.status !== 0 || safeString(owner.stdout).trim() !== binding.paneOwnerId) {
     throw new Error(`persisted Ralph pane owner changed: ${binding.paneId}`);
   }

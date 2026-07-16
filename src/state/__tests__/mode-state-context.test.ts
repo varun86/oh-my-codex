@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -45,10 +45,17 @@ describe('withModeRuntimeContext', () => {
     const originalPath = process.env.PATH;
     try {
       await writeFile(tmuxPath, `#!/bin/sh
+printf '%s\n' "$*" >> '${tmuxPath}.log'
 case "$1" in
   list-panes) printf '%%7\\t0\\t4242\\n' ;;
-  set-option) printf '%s' "$6" > '${tmuxPath}.owner' ;;
-  show-option) cat '${tmuxPath}.owner' ;;
+  set-option)
+    [ "$5" = '@omx_ralph_pane_owner_id' ] || exit 2
+    printf '%s' "$6" > '${tmuxPath}.ralph-owner'
+    ;;
+  show-option)
+    [ "$6" = '@omx_ralph_pane_owner_id' ] || exit 3
+    cat '${tmuxPath}.ralph-owner'
+    ;;
   display-message) printf 'ralph-session\\n' ;;
   *) exit 1 ;;
 esac
@@ -65,6 +72,7 @@ esac
       assert.equal(out.tmux_pane_pid, 4242);
       assert.equal(out.tmux_session_name, 'ralph-session');
       assert.match(String(out.tmux_pane_owner_id), /^ralph:[0-9a-f-]+$/);
+      assert.doesNotMatch(await readFile(`${tmuxPath}.log`, 'utf8'), /@omx_team_pane_owner_id/);
     } finally {
       if (originalPath === undefined) delete process.env.PATH;
       else process.env.PATH = originalPath;

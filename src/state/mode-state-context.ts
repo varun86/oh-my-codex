@@ -1,6 +1,5 @@
 import { randomUUID } from 'crypto';
 import { readExactPaneProofSync } from '../team/exact-pane.js';
-import { tagPaneTeamOwner } from '../team/tmux-session.js';
 import { spawnPlatformCommandSync } from '../utils/platform-command.js';
 
 import { execFileSync } from 'child_process';
@@ -44,6 +43,8 @@ function hasNonEmptyString(value: unknown): boolean {
   return typeof value === 'string' && value.trim() !== '';
 }
 
+export const OMX_RALPH_PANE_OWNER_OPTION = '@omx_ralph_pane_owner_id';
+
 interface RalphPaneBinding {
   paneId: string;
   panePid: number;
@@ -65,15 +66,18 @@ function captureRalphPaneBinding(paneId: string): RalphPaneBinding | null {
   if (initialProof.status !== 'live') return null;
 
   const paneOwnerId = `ralph:${randomUUID()}`;
-  try {
-    tagPaneTeamOwner(initialProof.paneId, paneOwnerId, initialProof.pid);
-  } catch {
-    return null;
-  }
+  const effectProof = readExactPaneProofSync(initialProof.paneId);
+  if (effectProof.status !== 'live' || effectProof.pid !== initialProof.pid) return null;
+  const tagged = spawnPlatformCommandSync(
+    'tmux',
+    ['set-option', '-p', '-t', effectProof.paneId, OMX_RALPH_PANE_OWNER_OPTION, paneOwnerId],
+    { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
+  ).result;
+  if (tagged.error || tagged.status !== 0) return null;
 
   const owner = spawnPlatformCommandSync(
     'tmux',
-    ['show-option', '-qv', '-p', '-t', initialProof.paneId, '@omx_team_pane_owner_id'],
+    ['show-option', '-qv', '-p', '-t', initialProof.paneId, OMX_RALPH_PANE_OWNER_OPTION],
     { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
   ).result;
   if (owner.error || owner.status !== 0 || typeof owner.stdout !== 'string' || owner.stdout.trim() !== paneOwnerId) {
