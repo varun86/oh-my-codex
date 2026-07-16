@@ -478,14 +478,38 @@ describe('scale-down cleanup debt path containment', () => {
     assert.equal(isSameOrInsidePath('C:\\repo\\.omx\\team\\alpha', 'C:\\repo', windowsPathSemantics), true);
   });
 
+  it('accepts mixed-separator, drive-letter, and case-equivalent Windows descendants', () => {
+    assert.equal(isSameOrInsidePath('c:/REPO/.omx\\team/alpha', 'C:\\repo', windowsPathSemantics), true);
+  });
+
+  it('accepts same-share UNC descendants across host and share casing', () => {
+    assert.equal(
+      isSameOrInsidePath('\\\\SERVER\\Share\\repo/.omx\\team\\alpha', '\\\\server\\share\\REPO', windowsPathSemantics),
+      true,
+    );
+  });
+
   for (const [name, candidate] of [
     ['a sibling prefix collision', 'C:\\repo-other\\worker'],
     ['a parent traversal escape', 'C:\\repo\\..\\foreign\\worker'],
     ['a foreign same-volume root', 'C:\\foreign\\worker'],
     ['an absolute relative result from a foreign drive', 'D:\\foreign\\worker'],
+    ['a foreign UNC host', '\\\\foreign-server\\share\\repo\\worker'],
+    ['a foreign UNC share', '\\\\server\\foreign-share\\repo\\worker'],
+    ['a UNC sibling prefix collision', '\\\\server\\share\\repo-other\\worker'],
   ] as const) {
     it(`rejects ${name} under native Windows path semantics`, () => {
       assert.equal(isSameOrInsidePath(candidate, 'C:\\repo', windowsPathSemantics), false);
+    });
+  }
+
+  for (const [name, candidate] of [
+    ['a foreign UNC host', '\\\\foreign-server\\share\\repo\\worker'],
+    ['a foreign UNC share', '\\\\server\\foreign-share\\repo\\worker'],
+    ['a UNC sibling prefix collision', '\\\\server\\share\\repo-other\\worker'],
+  ] as const) {
+    it(`rejects ${name} under native Windows UNC path semantics`, () => {
+      assert.equal(isSameOrInsidePath(candidate, '\\\\server\\share\\repo', windowsPathSemantics), false);
     });
   }
 

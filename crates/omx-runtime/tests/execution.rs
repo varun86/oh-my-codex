@@ -235,3 +235,84 @@ fn snapshot_from_state_dir_reads_persisted_state() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn exec_compact_immediately_persists_only_nonterminal_dispatch_records() {
+    let dir = std::env::temp_dir().join("omx-runtime-test-exec-compact-dispatch");
+    let _ = std::fs::remove_dir_all(&dir);
+    let state_arg = format!("--state-dir={}", dir.display());
+    let run_exec = |json: &str, compact: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_omx-runtime"));
+        command.args(["exec", json, &state_arg]);
+        if compact {
+            command.arg("--compact");
+        }
+        let output = command.output().expect("ran omx-runtime");
+        assert!(
+            output.status.success(),
+            "exec failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    run_exec(
+        r#"{"command":"QueueDispatch","request_id":"pending","target":"worker-pending"}"#,
+        false,
+    );
+    run_exec(
+        r#"{"command":"QueueDispatch","request_id":"notified","target":"worker-notified"}"#,
+        false,
+    );
+    run_exec(
+        r#"{"command":"MarkNotified","request_id":"notified","channel":"tmux"}"#,
+        false,
+    );
+    run_exec(
+        r#"{"command":"QueueDispatch","request_id":"delivered","target":"worker-delivered"}"#,
+        false,
+    );
+    run_exec(
+        r#"{"command":"MarkNotified","request_id":"delivered","channel":"tmux"}"#,
+        false,
+    );
+    run_exec(
+        r#"{"command":"MarkDelivered","request_id":"delivered"}"#,
+        false,
+    );
+    run_exec(r#"{"command":"CaptureSnapshot"}"#, false);
+    run_exec(
+        r#"{"command":"QueueDispatch","request_id":"failed","target":"worker-failed"}"#,
+        false,
+    );
+    run_exec(
+        r#"{"command":"MarkFailed","request_id":"failed","reason":"target unavailable"}"#,
+        true,
+    );
+
+    let dispatch: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("dispatch.json")).expect("read immediate dispatch view"),
+    )
+    .expect("valid dispatch JSON");
+    let records = dispatch["records"]
+        .as_array()
+        .expect("dispatch records array");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["request_id"], "pending");
+    assert_eq!(records[0]["status"], "pending");
+    assert_eq!(records[1]["request_id"], "notified");
+    assert_eq!(records[1]["status"], "notified");
+
+    let events: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("events.json")).expect("read compacted events"),
+    )
+    .expect("valid events JSON");
+    let events = events.as_array().expect("events array");
+    assert!(events
+        .iter()
+        .any(|event| event["event"] == "SnapshotCaptured"));
+    assert!(events
+        .iter()
+        .all(|event| { event["request_id"] != "delivered" && event["request_id"] != "failed" }));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

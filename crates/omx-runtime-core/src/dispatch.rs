@@ -156,6 +156,13 @@ impl DispatchLog {
         &self.records
     }
 
+    /// Remove records that have reached a terminal delivery state.
+    pub fn prune_terminal_records(&mut self) {
+        self.records.retain(|record| {
+            record.status != DispatchStatus::Delivered && record.status != DispatchStatus::Failed
+        });
+    }
+
     pub fn to_backlog_snapshot(&self) -> BacklogSnapshot {
         let mut snapshot = BacklogSnapshot::default();
         for record in &self.records {
@@ -311,6 +318,28 @@ mod tests {
         assert_eq!(snap.notified, 0);
         assert_eq!(snap.delivered, 1);
         assert_eq!(snap.failed, 1);
+    }
+
+    #[test]
+    fn prune_terminal_records_keeps_pending_and_notified_records() {
+        let mut log = DispatchLog::new();
+        log.queue("pending", "w1", None);
+        log.queue("notified", "w2", None);
+        log.queue("delivered", "w3", None);
+        log.queue("failed", "w4", None);
+        log.mark_notified("notified", "tmux").unwrap();
+        log.mark_notified("delivered", "tmux").unwrap();
+        log.mark_delivered("delivered").unwrap();
+        log.mark_failed("failed", "target resolution failed")
+            .unwrap();
+
+        log.prune_terminal_records();
+
+        assert_eq!(log.records().len(), 2);
+        assert_eq!(log.records()[0].request_id, "pending");
+        assert_eq!(log.records()[0].status, DispatchStatus::Pending);
+        assert_eq!(log.records()[1].request_id, "notified");
+        assert_eq!(log.records()[1].status, DispatchStatus::Notified);
     }
 
     #[test]

@@ -7819,6 +7819,71 @@ esac
     }
   });
 
+  it('preserves Team state when the post-kill detached-session query fails for a non-no-server reason', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-detached-session-post-kill-query-failure-'));
+    try {
+      await withMockTmuxFixture(
+        {
+          dirPrefix: 'omx-runtime-detached-session-post-kill-query-failure-bin-',
+          tmuxScript: (tmuxLogPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  -V) echo 'tmux 3.4' ;;
+  list-panes)
+    case "$*" in
+      *'#{session_name}'*) printf '%%1\t0\t4241\tomx-team-team-postkill-query-fail\n' ;;
+      *'-a -F #{pane_id}'*) printf '%%1\\t0\\t4241\\n' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  show-option|show-options) echo 'team:team-postkill-query-fail' ;;
+  kill-session) : > "${tmuxLogPath}.session-killed" ;;
+  list-sessions)
+    if [ -f "${tmuxLogPath}.session-killed" ]; then
+      printf '%s\\n' 'failed to connect to server: Permission denied' >&2
+      exit 1
+    fi
+    echo 'omx-team-team-postkill-query-fail'
+    ;;
+  *) exit 0 ;;
+esac
+`,
+        },
+        async ({ tmuxLogPath }) => {
+          const teamName = 'team-postkill-query-fail';
+          await initTeamState(teamName, 'retain state after detached-session query failure', 'executor', 1, cwd);
+          const config = await readTeamConfig(teamName, cwd);
+          assert.ok(config);
+          if (!config) return;
+          config.tmux_session = 'omx-team-team-postkill-query-fail';
+          config.leader_pane_id = '%1';
+          config.leader_pane_pid = 4241;
+          config.hud_pane_id = null;
+          config.tmux_pane_owner_id = 'team:team-postkill-query-fail';
+          config.workers[0]!.pane_id = '';
+          config.workers[0]!.pid = undefined;
+          await saveTeamConfig(config, cwd);
+
+          await assert.rejects(
+            () => shutdownTeam(teamName, cwd, { force: true }),
+            /detached_session_destroy_unresolved:omx-team-team-postkill-query-fail/,
+          );
+
+          assert.ok(await readTeamConfig(teamName, cwd));
+          const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+          assert.match(tmuxLog, /kill-session -t omx-team-team-postkill-query-fail/);
+          assert.ok(
+            tmuxLog.indexOf('kill-session -t omx-team-team-postkill-query-fail')
+              < tmuxLog.indexOf('list-sessions -F #{session_name}'),
+          );
+        },
+      );
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('shutdownTeam fails closed when detached HUD PID changes before teardown', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-detached-hud-pid-takeover-'));
     try {

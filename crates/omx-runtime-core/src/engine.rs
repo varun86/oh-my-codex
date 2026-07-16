@@ -238,6 +238,7 @@ impl RuntimeEngine {
             }
             _ => true,
         });
+        self.dispatch.prune_terminal_records();
     }
 
     pub fn persist(&self) -> Result<(), EngineError> {
