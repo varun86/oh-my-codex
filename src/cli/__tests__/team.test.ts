@@ -1644,6 +1644,9 @@ case "$1" in
         ;;
       *"-F #{pane_id}\t#{pane_current_command}\t#{pane_start_command}"*)
         printf "%%11\tzsh\tzsh\n%%12\tnode\tnode /tmp/bin/omx.js hud --watch\n%%13\tcodex\tenv OMX_TEAM_INTERNAL_WORKER=shared-shutdown-cli/worker-1 codex\n%%14\tcodex\tenv OMX_TEAM_INTERNAL_WORKER=shared-shutdown-cli/worker-2 codex\n"
+        if [ -f "${restoredHudPanePath}" ]; then
+          printf "%%44\tnode\tenv OMX_TMUX_HUD_OWNER=1 OMX_TMUX_HUD_LEADER_PANE=%%11 node /tmp/bin/omx.js hud --watch\n"
+        fi
         exit 0
         ;;
       *"-F #{pane_id}"*)
@@ -1672,6 +1675,9 @@ case "$1" in
         echo "team:shared-shutdown-cli"
         ;;
       *"-p -t %14 @omx_team_pane_owner_id"*)
+        echo "team:shared-shutdown-cli"
+        ;;
+      *"-p -t %44 @omx_team_pane_owner_id"*)
         echo "team:shared-shutdown-cli"
         ;;
       *)
@@ -1793,6 +1799,10 @@ esac
         assert.ok(hudPanePid > 0);
         assert.ok(workerPaneOnePid > 0);
         assert.ok(workerPaneTwoPid > 0);
+        const paneOwnerId = 'team:shared-shutdown-in-pane';
+        for (const paneId of [fixture.leaderPaneId, hudPaneId, workerPaneOne, workerPaneTwo]) {
+          runFixtureTmux(fixture, ['set-option', '-p', '-t', paneId, '@omx_team_pane_owner_id', paneOwnerId]);
+        }
 
         await initTeamState(teamName, 'shared shutdown in-pane test', 'executor', 2, wd);
         const config = await readTeamConfig(teamName, wd);
@@ -1803,6 +1813,7 @@ esac
         config.leader_pane_pid = leaderPanePid;
         config.hud_pane_id = hudPaneId;
         config.hud_pane_pid = hudPanePid;
+        config.tmux_pane_owner_id = paneOwnerId;
         config.workers[0]!.pane_id = workerPaneOne;
         config.workers[0]!.pid = workerPaneOnePid;
         config.workers[1]!.pane_id = workerPaneTwo;
